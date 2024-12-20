@@ -3,16 +3,16 @@ https://github.com/KhronosGroup/glTF/tree/master/specification/2.0#reference-mes
 
 Author: Matthew Matl
 """
-
 import copy
 
 import numpy as np
 
+# import trimesh
 from genesis.ext import trimesh
 
+from .primitive import Primitive
 from .constants import GLTF
 from .material import MetallicRoughnessMaterial
-from .primitive import Primitive
 
 
 class Mesh(object):
@@ -147,7 +147,7 @@ class Mesh(object):
         is_visible=True,
         poses=None,
         wireframe=False,
-        smooth=False,
+        smooth=True,
         double_sided=False,
         is_floor=False,
     ):
@@ -189,7 +189,6 @@ class Mesh(object):
             positions = None
             normals = None
             indices = None
-            vertex_mapping = None
 
             # Compute positions, normals, and indices
             if smooth:
@@ -199,7 +198,6 @@ class Mesh(object):
             else:
                 positions = m.vertices[m.faces].reshape((3 * len(m.faces), 3))
                 normals = np.repeat(m.face_normals, 3, axis=0)
-                vertex_mapping = m.faces.reshape((-1,))
 
             # Compute colors, texture coords, and material properties
             color_0, texcoord_0, primitive_material = Mesh._get_trimesh_props(m, smooth=smooth, material=material)
@@ -228,9 +226,6 @@ class Mesh(object):
                     material=primitive_material,
                     mode=GLTF.TRIANGLES,
                     poses=poses,
-                    vertex_mapping=vertex_mapping,
-                    double_sided=double_sided,
-                    is_floor=is_floor,
                 )
             )
 
@@ -255,10 +250,7 @@ class Mesh(object):
                 if smooth:
                     colors = vc
                 else:
-                    if vc.ndim == 1:
-                        colors = vc
-                    else:
-                        colors = vc[mesh.faces].reshape((3 * len(mesh.faces), vc.shape[1]))
+                    colors = vc[mesh.faces].reshape((3 * len(mesh.faces), vc.shape[1]))
                 material = MetallicRoughnessMaterial(
                     alphaMode="BLEND", baseColorFactor=[1.0, 1.0, 1.0, 1.0], metallicFactor=0.2, roughnessFactor=0.8
                 )
@@ -276,7 +268,7 @@ class Mesh(object):
         # Process texture colors
         if mesh.visual.kind == "texture":
             # Configure UV coordinates
-            if mesh.visual.uv is not None:
+            if mesh.visual.uv is not None and len(mesh.visual.uv) != 0:
                 uv = mesh.visual.uv.copy()
                 if smooth:
                     texcoords = uv
@@ -310,8 +302,6 @@ class Mesh(object):
                     material = MetallicRoughnessMaterial(
                         alphaMode="BLEND",
                         roughnessFactor=roughness,
-                        # NOTE: most assets seems to have incorrect mat.diffuse when texture image exists, So let's just use white for baseColorFactor
-                        # baseColorFactor=np.array([255, 255, 255, 255], dtype=np.uint8) if mat.image is not None else mat.diffuse,
                         baseColorFactor=mat.diffuse,
                         baseColorTexture=mat.image,
                     )

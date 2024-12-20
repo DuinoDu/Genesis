@@ -2,34 +2,31 @@
 
 Author: Matthew Matl
 """
-
 import sys
-from time import time
 
 import numpy as np
 import PIL
-from OpenGL.GL import *
-import matplotlib.pyplot as plt
 
 from .constants import (
+    RenderFlags,
+    TextAlign,
+    GLTF,
+    BufFlags,
+    TexFlags,
+    ProgramFlags,
     DEFAULT_Z_FAR,
     DEFAULT_Z_NEAR,
-    GLTF,
-    MAX_N_LIGHTS,
     SHADOW_TEX_SZ,
-    BufFlags,
-    ProgramFlags,
-    RenderFlags,
-    TexFlags,
-    TextAlign,
+    MAX_N_LIGHTS,
 )
-from .font import FontCache
-from .jit_render import JITRenderer
-from .light import DirectionalLight, PointLight, SpotLight
-from .material import MetallicRoughnessMaterial, SpecularGlossinessMaterial
 from .shader_program import ShaderProgramCache
+from .material import MetallicRoughnessMaterial, SpecularGlossinessMaterial
+from .light import PointLight, SpotLight, DirectionalLight
+from .font import FontCache
 from .utils import format_color_vector
-from .texture import Texture
+
+from OpenGL.GL import *
+from .jit_render import JITRenderer
 
 
 class Renderer(object):
@@ -50,7 +47,7 @@ class Renderer(object):
         Size of points in pixels. Defaults to 1.0.
     """
 
-    def __init__(self, viewport_width, viewport_height, jit, point_size=1.0):
+    def __init__(self, viewport_width, viewport_height, point_size=1.0):
         self.dpscale = 1
         # Scaling needed on retina displays
         if sys.platform == "darwin":
@@ -69,7 +66,6 @@ class Renderer(object):
         self._main_db_ms = None
         self._main_fb_dims = (None, None)
         self._shadow_fb = None
-        self._floor_fb = None
         self._latest_znear = DEFAULT_Z_NEAR
         self._latest_zfar = DEFAULT_Z_FAR
 
@@ -80,11 +76,6 @@ class Renderer(object):
         self._mesh_textures = set()
         self._shadow_textures = set()
         self._texture_alloc_idx = 0
-
-        self._floor_texture_color = None
-        self._floor_texture_depth = None
-
-        self.jit = jit
 
     @property
     def viewport_width(self):
@@ -140,11 +131,6 @@ class Renderer(object):
         # Update context with meshes and textures
         self._update_context(scene, flags)
 
-        self.jit.update(scene)
-
-        if bool(flags & RenderFlags.DEPTH_ONLY or flags & RenderFlags.SEG or flags & RenderFlags.FLAT):
-            flags &= ~RenderFlags.REFLECTIVE_FLOOR
-
         # Render necessary shadow maps
         if not bool(flags & RenderFlags.DEPTH_ONLY or flags & RenderFlags.SEG):
             for ln in scene.light_nodes:
@@ -152,22 +138,14 @@ class Renderer(object):
                 if isinstance(ln.light, DirectionalLight) and bool(flags & RenderFlags.SHADOWS_DIRECTIONAL):
                     take_pass = True
                 elif isinstance(ln.light, SpotLight) and bool(flags & RenderFlags.SHADOWS_SPOT):
-                    take_pass = False
+                    take_pass = True
                 elif isinstance(ln.light, PointLight) and bool(flags & RenderFlags.SHADOWS_POINT):
                     take_pass = True
                 if take_pass:
-                    if isinstance(ln.light, PointLight):
-                        self._point_shadow_mapping_pass(scene, ln, flags)
-                    else:
-                        self._shadow_mapping_pass(scene, ln, flags)
+                    self._shadow_mapping_pass(scene, ln, flags)
 
         # Make forward pass
-        # forward_pass_start = time()
-        if flags & RenderFlags.REFLECTIVE_FLOOR:
-            self._floor_pass(scene, flags)
         retval = self._forward_pass(scene, flags, seg_node_map=seg_node_map)
-        # retval = self._forward_pass_legacy(scene, flags, seg_node_map=seg_node_map)
-        # print('render_forward', time()-forward_pass_start)
 
         # If necessary, make normals pass
         if flags & (RenderFlags.VERTEX_NORMALS | RenderFlags.FACE_NORMALS):
@@ -244,41 +222,6 @@ class Renderer(object):
         # Draw text
         font.render_string(text, x, y, scale, align)
 
-    def render_texts(self, texts, x, y, font_name="UbuntuMono-Regular", font_pt=40, color=None, scale=1.0):
-        x *= self.dpscale
-        y *= self.dpscale
-        font_pt *= self.dpscale
-
-        if color is None:
-            color = np.array([0.0, 0.0, 0.0, 1.0])
-        else:
-            color = format_color_vector(color, 4)
-
-        # Set up viewport for render
-        self._configure_forward_pass_viewport(0)
-
-        # Load font
-        font = self._font_cache.get_font(font_name, font_pt)
-        if not font._in_context():
-            font._add_to_context()
-
-        # Load program
-        program = self._get_text_program()
-        program._bind()
-
-        # Set uniforms
-        p = np.eye(4)
-        p[0, 0] = 2.0 / self.viewport_width
-        p[0, 3] = -1.0
-        p[1, 1] = 2.0 / self.viewport_height
-        p[1, 3] = -1.0
-        program.set_uniform("projection", p)
-        program.set_uniform("text_color", color)
-
-        # Draw text
-        for i, text in enumerate(texts):
-            font.render_string(text, x, int(y - i * font_pt * 1.1), scale, TextAlign.TOP_LEFT)
-
     def read_color_buf(self):
         """Read and return the current viewport's color buffer.
 
@@ -306,7 +249,7 @@ class Renderer(object):
 
         return color_im
 
-    def get_tex_image(self, tex_id, bind_target=GL_TEXTURE_2D, read_target=GL_TEXTURE_2D, width=None, height=None):
+    def read_depth_buf(self):
         """Read and return the current viewport's color buffer.
 
         Returns
@@ -314,25 +257,14 @@ class Renderer(object):
         depth_im : (h, w) float32
             The depth buffer in linear units.
         """
-        # width, height = self.viewport_width, self.viewport_height
-        # width, height = 8192, 8192
-        # glBindFramebuffer(GL_READ_FRAMEBUFFER, self._shadow_fb)
-        # glReadBuffer(GL_NONE)
-        # depth_buf = glReadPixels(
-        #     0, 0, width, height, GL_DEPTH_COMPONENT, GL_FLOAT
-        # )
-
-        glBindTexture(bind_target, tex_id)
-        depth_buf = glGetTexImage(read_target, 0, GL_RGB, GL_FLOAT)
+        width, height = self.viewport_width, self.viewport_height
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, 0)
+        glReadBuffer(GL_FRONT)
+        depth_buf = glReadPixels(0, 0, width, height, GL_DEPTH_COMPONENT, GL_FLOAT)
 
         depth_im = np.frombuffer(depth_buf, dtype=np.float32)
-        if width is None:
-            height = int(depth_im.size**0.5)
-            width = height
-        depth_im = depth_im.reshape((height, width, 3))
+        depth_im = depth_im.reshape((height, width))
         depth_im = np.flip(depth_im, axis=0)
-
-        return depth_im
 
         inf_inds = depth_im == 1.0
         depth_im = 2.0 * depth_im - 1.0
@@ -344,9 +276,9 @@ class Renderer(object):
             depth_im[noninf] = (2.0 * z_near * z_far) / (z_far + z_near - depth_im[noninf] * (z_far - z_near))
         depth_im[inf_inds] = 0.0
 
-        # # Resize for macos if needed
-        # if sys.platform == 'darwin':
-        #     depth_im = self._resize_image(depth_im)
+        # Resize for macos if needed
+        if sys.platform == "darwin":
+            depth_im = self._resize_image(depth_im)
 
         return depth_im
 
@@ -377,7 +309,6 @@ class Renderer(object):
 
         self._delete_main_framebuffer()
         self._delete_shadow_framebuffer()
-        self._delete_floor_framebuffer()
 
     def __del__(self):
         try:
@@ -385,7 +316,11 @@ class Renderer(object):
         except Exception:
             pass
 
-    def _forward_pass_legacy(self, scene, flags, seg_node_map=None):
+    ###########################################################################
+    # Rendering passes
+    ###########################################################################
+
+    def _forward_pass(self, scene, flags, seg_node_map=None):
         # Set up viewport for render
         self._configure_forward_pass_viewport(flags)
 
@@ -409,7 +344,7 @@ class Renderer(object):
 
         program = None
         # Now, render each object in sorted order
-        for node in scene.sorted_mesh_nodes():
+        for node in self._sorted_mesh_nodes(scene):
             mesh = node.mesh
 
             # Skip the mesh if it's not visible
@@ -428,7 +363,6 @@ class Renderer(object):
                 color = color / 255.0
 
             for primitive in mesh.primitives:
-
                 # First, get and bind the appropriate program
                 program = self._get_primitive_program(primitive, flags, ProgramFlags.USE_MATERIAL)
                 program._bind()
@@ -461,147 +395,6 @@ class Renderer(object):
         else:
             return
 
-    ###########################################################################
-    # Rendering passes
-    ###########################################################################
-
-    def _floor_pass(self, scene, flags, seg_node_map=None):
-        self._configure_floor_pass_viewport(flags)
-        glClearColor(0.0, 0.0, 0.0, 1.0)
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-
-        V, P = self._get_camera_matrices(scene)
-
-        cam_pos = scene.get_pose(scene.main_camera_node)[:3, 3]
-        screen_size = np.array([self.viewport_width, self.viewport_height], np.float32)
-
-        self.jit.forward_pass(
-            self,
-            V,
-            P,
-            cam_pos,
-            flags | RenderFlags.SKIP_FLOOR,
-            ProgramFlags.USE_MATERIAL,
-            screen_size,
-            reflection_mat=self.jit.reflection_mat,
-        )
-
-        # tmp = self.get_tex_image(self._floor_texture_color._texid, width=self.viewport_width, height=self.viewport_height)
-        # plt.imshow(tmp)
-        # plt.show()
-
-    def _forward_pass(self, scene, flags, seg_node_map=None):
-        # Set up viewport for render
-        self._configure_forward_pass_viewport(flags)
-
-        # Clear it
-        if bool(flags & RenderFlags.SEG):
-            glClearColor(0.0, 0.0, 0.0, 1.0)
-            if seg_node_map is None:
-                seg_node_map = {}
-        else:
-            glClearColor(*scene.bg_color)
-
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-
-        if not bool(flags & RenderFlags.SEG):
-            glEnable(GL_MULTISAMPLE)
-        else:
-            glDisable(GL_MULTISAMPLE)
-
-        # Set up camera matrices
-        V, P = self._get_camera_matrices(scene)
-
-        cam_pos = scene.get_pose(scene.main_camera_node)[:3, 3]
-
-        # for i in range(6):
-        #     dep = self.get_depth_image(self.jit.shadow_map[0], GL_TEXTURE_CUBE_MAP, GL_TEXTURE_CUBE_MAP_POSITIVE_X+i)
-        #     print(dep.min(), dep.max())
-        #     plt.imshow(dep)
-        #     plt.show()
-        floor_tex = self._floor_texture_color._texid if flags & RenderFlags.REFLECTIVE_FLOOR else 0
-        screen_size = np.array([self.viewport_width, self.viewport_height], np.float32)
-
-        if flags & RenderFlags.SEG:
-            color_list = np.zeros((len(self.jit.node_list), 3), np.float32)
-            for i, node in enumerate(self.jit.node_list):
-                if node not in seg_node_map:
-                    color_list[i, :] = -2.0
-                else:
-                    color_list[i] = seg_node_map[node] / 255.0
-            self.jit.forward_pass(self, V, P, cam_pos, flags, ProgramFlags.USE_MATERIAL, screen_size, color_list)
-        else:
-            self.jit.forward_pass(
-                self, V, P, cam_pos, flags, ProgramFlags.USE_MATERIAL, screen_size, floor_tex=floor_tex
-            )
-            # self.jit.forward_pass(self, V, P, cam_pos, flags, ProgramFlags.USE_MATERIAL,
-            #                       reflection_mat=np.diag(np.array([1.0, 1.0, -1.0, 1.0], dtype=np.float32)))
-
-        # If doing offscreen render, copy result from framebuffer and return
-        if flags & RenderFlags.OFFSCREEN:
-            return self._read_main_framebuffer(scene, flags)
-        else:
-            return
-
-    def _point_shadow_mapping_pass(self, scene, light_node, flags):
-        light = light_node.light
-        position = scene.get_pose(light_node)[:3, 3]
-        camera = light._get_shadow_camera(scene.scale)
-        projection = camera.get_projection_matrix()
-        view = light._get_view_matrices(position)
-        light_matrix = projection @ view
-
-        self._configure_point_shadow_mapping_viewport(light, flags)
-
-        self.jit.point_shadow_mapping_pass(self, light_matrix, position, flags, ProgramFlags.POINT_SHADOW)
-
-    def _point_shadow_mapping_pass_legacy(self, scene, light_node, flags):
-        light = light_node.light
-        position = scene.get_pose(light_node)[:3, 3]
-        camera = light._get_shadow_camera(scene.scale)
-        projection = camera.get_projection_matrix()
-        view = light._get_view_matrices(position)
-        light_matrix = projection @ view
-
-        self._configure_point_shadow_mapping_viewport(light, flags)
-
-        for node in scene.sorted_mesh_nodes():
-            mesh = node.mesh
-
-            # Skip the mesh if it's not visible
-            if not mesh.is_visible:
-                continue
-
-            for primitive in mesh.primitives:
-
-                # First, get and bind the appropriate program
-                program = self._get_primitive_program(primitive, flags, ProgramFlags.POINT_SHADOW)
-                program._bind()
-
-                # Set the camera uniforms
-                for i in range(6):
-                    program.set_uniform("light_matrix[" + str(i) + "]", light_matrix[i])
-                program.set_uniform("light_pos", position)
-                # program.set_uniform(
-                #     'cam_pos', scene.get_pose(scene.main_camera_node)[:3,3]
-                # )
-
-                # Finally, bind and draw the primitive
-                self._bind_and_draw_primitive(
-                    primitive=primitive, pose=scene.get_pose(node), program=program, flags=RenderFlags.DEPTH_ONLY
-                )
-                self._reset_active_textures()
-
-        # for i in range(6):
-        #     dep = self.get_depth_image(light.shadow_texture._texid, GL_TEXTURE_CUBE_MAP, GL_TEXTURE_CUBE_MAP_POSITIVE_X+i)
-        #     print(dep.min(), dep.max())
-        #     plt.imshow(dep)
-        #     plt.show()
-
-        if program is not None:
-            program._unbind()
-        glFlush()
-
     def _shadow_mapping_pass(self, scene, light_node, flags):
         light = light_node.light
 
@@ -611,24 +404,8 @@ class Renderer(object):
         # Set up camera matrices
         V, P = self._get_light_cam_matrices(scene, light_node, flags)
 
-        self.jit.shadow_mapping_pass(self, V, P, flags, ProgramFlags.NONE)
-
-        # dep = self.get_depth_image(light.shadow_texture._texid)
-        # plt.imshow(dep)
-        # plt.show()
-        # plt.savefig('tmp/tmp_dep.jpg')
-
-    def _shadow_mapping_pass_legacy(self, scene, light_node, flags):
-        light = light_node.light
-
-        # Set up viewport for render
-        self._configure_shadow_mapping_viewport(light, flags)
-
-        # Set up camera matrices
-        V, P = self._get_light_cam_matrices(scene, light_node, flags)
-
         # Now, render each object in sorted order
-        for node in scene.sorted_mesh_nodes():
+        for node in self._sorted_mesh_nodes(scene):
             mesh = node.mesh
 
             # Skip the mesh if it's not visible
@@ -636,7 +413,6 @@ class Renderer(object):
                 continue
 
             for primitive in mesh.primitives:
-
                 # First, get and bind the appropriate program
                 program = self._get_primitive_program(primitive, flags, ProgramFlags.NONE)
                 program._bind()
@@ -644,19 +420,13 @@ class Renderer(object):
                 # Set the camera uniforms
                 program.set_uniform("V", V)
                 program.set_uniform("P", P)
-                # program.set_uniform(
-                #     'cam_pos', scene.get_pose(scene.main_camera_node)[:3,3]
-                # )
+                program.set_uniform("cam_pos", scene.get_pose(scene.main_camera_node)[:3, 3])
 
                 # Finally, bind and draw the primitive
                 self._bind_and_draw_primitive(
                     primitive=primitive, pose=scene.get_pose(node), program=program, flags=RenderFlags.DEPTH_ONLY
                 )
                 self._reset_active_textures()
-
-        # dep = self.get_depth_image(light.shadow_texture._texid)
-        # plt.imshow(dep)
-        # plt.savefig('tmp/tmp_dep.jpg')
 
         # Unbind the shader and flush the output
         if program is not None:
@@ -672,7 +442,7 @@ class Renderer(object):
         V, P = self._get_camera_matrices(scene)
 
         # Now, render each object in sorted order
-        for node in scene.sorted_mesh_nodes():
+        for node in self._sorted_mesh_nodes(scene):
             mesh = node.mesh
 
             # Skip the mesh if it's not visible
@@ -680,7 +450,6 @@ class Renderer(object):
                 continue
 
             for primitive in mesh.primitives:
-
                 # Skip objects that don't have normals
                 if not primitive.buf_flags & BufFlags.NORMAL:
                     continue
@@ -877,11 +646,27 @@ class Renderer(object):
                 else:
                     raise NotImplementedError("Point light shadows not implemented")
 
+    def _sorted_mesh_nodes(self, scene):
+        cam_loc = scene.get_pose(scene.main_camera_node)[:3, 3]
+        solid_nodes = []
+        trans_nodes = []
+        for node in scene.mesh_nodes:
+            mesh = node.mesh
+            if mesh.is_transparent:
+                trans_nodes.append(node)
+            else:
+                solid_nodes.append(node)
+
+        # TODO BETTER SORTING METHOD
+        trans_nodes.sort(key=lambda n: -np.linalg.norm(scene.get_pose(n)[:3, 3] - cam_loc))
+        solid_nodes.sort(key=lambda n: -np.linalg.norm(scene.get_pose(n)[:3, 3] - cam_loc))
+
+        return solid_nodes + trans_nodes
+
     def _sorted_nodes_by_distance(self, scene, nodes, compare_node):
         nodes = list(nodes)
-        if compare_node is not None:
-            compare_posn = scene.get_pose(compare_node)[:3, 3]
-            nodes.sort(key=lambda n: np.linalg.norm(scene.get_pose(n)[:3, 3] - compare_posn))
+        compare_posn = scene.get_pose(compare_node)[:3, 3]
+        nodes.sort(key=lambda n: np.linalg.norm(scene.get_pose(n)[:3, 3] - compare_posn))
         return nodes
 
     ###########################################################################
@@ -889,7 +674,6 @@ class Renderer(object):
     ###########################################################################
 
     def _update_context(self, scene, flags):
-
         # Update meshes
         scene_meshes = scene.meshes
 
@@ -1009,7 +793,7 @@ class Renderer(object):
 
     def _compute_max_n_lights(self, flags):
         max_n_lights = [MAX_N_LIGHTS, MAX_N_LIGHTS, MAX_N_LIGHTS]
-        # n_tex_units = glGetIntegerv(GL_MAX_TEXTURE_IMAGE_UNITS)
+        n_tex_units = glGetIntegerv(GL_MAX_TEXTURE_IMAGE_UNITS)
 
         # Reserved texture units: 6
         #   Normal Map
@@ -1019,11 +803,28 @@ class Renderer(object):
         #   MR or SG Map
         #   Environment cubemap
 
-        # n_reserved_textures = 6
-        # n_available_textures = n_tex_units - n_reserved_textures
+        n_reserved_textures = 6
+        n_available_textures = n_tex_units - n_reserved_textures
 
-        # if flags & RenderFlags.SHADOWS_DIRECTIONAL and n_available_textures < max_n_lights[0]:
-        #     max_n_lights[0] = n_available_textures
+        # Distribute textures evenly among lights with shadows, with
+        # a preference for directional lights
+        n_shadow_types = 0
+        if flags & RenderFlags.SHADOWS_DIRECTIONAL:
+            n_shadow_types += 1
+        if flags & RenderFlags.SHADOWS_SPOT:
+            n_shadow_types += 1
+        if flags & RenderFlags.SHADOWS_POINT:
+            n_shadow_types += 1
+
+        if n_shadow_types > 0:
+            tex_per_light = n_available_textures // n_shadow_types
+
+            if flags & RenderFlags.SHADOWS_DIRECTIONAL:
+                max_n_lights[0] = tex_per_light + (n_available_textures - tex_per_light * n_shadow_types)
+            if flags & RenderFlags.SHADOWS_SPOT:
+                max_n_lights[1] = tex_per_light
+            if flags & RenderFlags.SHADOWS_POINT:
+                max_n_lights[2] = tex_per_light
 
         return max_n_lights
 
@@ -1033,11 +834,7 @@ class Renderer(object):
         geometry_shader = None
         defines = {}
 
-        if program_flags & ProgramFlags.POINT_SHADOW:
-            vertex_shader = "point_shadow.vert"
-            fragment_shader = "point_shadow.frag"
-            geometry_shader = "point_shadow.geom"
-        elif (
+        if (
             bool(program_flags & ProgramFlags.USE_MATERIAL)
             and not flags & RenderFlags.DEPTH_ONLY
             and not flags & RenderFlags.FLAT
@@ -1045,9 +842,6 @@ class Renderer(object):
         ):
             vertex_shader = "mesh.vert"
             fragment_shader = "mesh.frag"
-            if primitive.double_sided:
-                geometry_shader = "mesh_double_sided.geom"
-                defines["DOUBLE_SIDED"] = 1
         elif bool(program_flags & (ProgramFlags.VERTEX_NORMALS | ProgramFlags.FACE_NORMALS)):
             vertex_shader = "vertex_normals.vert"
             if primitive.mode == GLTF.POINTS:
@@ -1148,14 +942,10 @@ class Renderer(object):
     ###########################################################################
 
     def _configure_forward_pass_viewport(self, flags):
-
         # If using offscreen render, bind main framebuffer
         if flags & RenderFlags.OFFSCREEN:
             self._configure_main_framebuffer()
-            if flags & RenderFlags.SEG:
-                glBindFramebuffer(GL_DRAW_FRAMEBUFFER, self._main_fb)
-            else:
-                glBindFramebuffer(GL_DRAW_FRAMEBUFFER, self._main_fb_ms)
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, self._main_fb_ms)
         else:
             glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0)
 
@@ -1165,35 +955,13 @@ class Renderer(object):
         glDepthFunc(GL_LESS)
         glDepthRange(0.0, 1.0)
 
-    def _configure_floor_pass_viewport(self, flags):
-        self._configure_floor_framebuffer()
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, self._floor_fb)
-
-        glViewport(0, 0, self.viewport_width, self.viewport_height)
-        glEnable(GL_DEPTH_TEST)
-        glDepthMask(GL_TRUE)
-        glDepthFunc(GL_LESS)
-        glDepthRange(0.0, 1.0)
-
-    def _configure_point_shadow_mapping_viewport(self, light, flags):
-        self._configure_shadow_framebuffer()
-        glBindFramebuffer(GL_FRAMEBUFFER, self._shadow_fb)
-        light.shadow_texture._bind_as_depth_attachment()
-        glDrawBuffer(GL_NONE)
-        glReadBuffer(GL_NONE)
-
-        glClear(GL_DEPTH_BUFFER_BIT)
-        glViewport(0, 0, SHADOW_TEX_SZ, SHADOW_TEX_SZ)
-        glEnable(GL_DEPTH_TEST)
-        glDepthMask(GL_TRUE)
-        glDepthFunc(GL_LESS)
-        glDisable(GL_CULL_FACE)
-        glDisable(GL_BLEND)
-
     def _configure_shadow_mapping_viewport(self, light, flags):
         self._configure_shadow_framebuffer()
         glBindFramebuffer(GL_FRAMEBUFFER, self._shadow_fb)
+        light.shadow_texture._bind()
         light.shadow_texture._bind_as_depth_attachment()
+        glActiveTexture(GL_TEXTURE0)
+        light.shadow_texture._bind()
         glDrawBuffer(GL_NONE)
         glReadBuffer(GL_NONE)
 
@@ -1210,34 +978,6 @@ class Renderer(object):
     # Framebuffer Management
     ###########################################################################
 
-    def _configure_floor_framebuffer(self):
-        if self._floor_texture_depth is None:
-            self._floor_texture_depth = Texture(
-                width=self.viewport_width, height=self.viewport_height, source_channels="D", data_format=GL_FLOAT
-            )
-            self._floor_texture_depth._add_to_context()
-        if self._floor_texture_color is None:
-            self._floor_texture_color = Texture(
-                width=self.viewport_width, height=self.viewport_height, source_channels="RGB", data_format=GL_FLOAT
-            )
-            self._floor_texture_color._add_to_context()
-        if self._floor_fb is None:
-            self._floor_fb = glGenFramebuffers(1)
-            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, self._floor_fb)
-            self._floor_texture_color._bind_as_color_attachment()
-            self._floor_texture_depth._bind_as_depth_attachment()
-
-    def _delete_floor_framebuffer(self):
-        if self._floor_fb is not None:
-            glDeleteFramebuffers(1, [self._floor_fb])
-            self._shadow_fb = None
-
-        if self._floor_texture_color is not None:
-            self._floor_texture_color.delete()
-
-        if self._floor_texture_depth is not None:
-            self._floor_texture_depth.delete()
-
     def _configure_shadow_framebuffer(self):
         if self._shadow_fb is None:
             self._shadow_fb = glGenFramebuffers(1)
@@ -1245,7 +985,6 @@ class Renderer(object):
     def _delete_shadow_framebuffer(self):
         if self._shadow_fb is not None:
             glDeleteFramebuffers(1, [self._shadow_fb])
-            self._shadow_fb = None
 
     def _configure_main_framebuffer(self):
         # If mismatch with prior framebuffer, delete it
@@ -1306,54 +1045,50 @@ class Renderer(object):
     def _read_main_framebuffer(self, scene, flags):
         width, height = self._main_fb_dims[0], self._main_fb_dims[1]
 
-        if not (flags & RenderFlags.SEG):
-            # Bind framebuffer and blit buffers
-            glBindFramebuffer(GL_READ_FRAMEBUFFER, self._main_fb_ms)
-            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, self._main_fb)
-            glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_LINEAR)
-            glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_DEPTH_BUFFER_BIT, GL_NEAREST)
+        # Bind framebuffer and blit buffers
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, self._main_fb_ms)
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, self._main_fb)
+        glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_LINEAR)
+        glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_DEPTH_BUFFER_BIT, GL_NEAREST)
         glBindFramebuffer(GL_READ_FRAMEBUFFER, self._main_fb)
 
-        # # Read depth
+        # Read depth
+        depth_buf = glReadPixels(0, 0, width, height, GL_DEPTH_COMPONENT, GL_FLOAT)
+        depth_im = np.frombuffer(depth_buf, dtype=np.float32)
+        depth_im = depth_im.reshape((height, width))
+        depth_im = np.flip(depth_im, axis=0)
+        inf_inds = depth_im == 1.0
+        depth_im = 2.0 * depth_im - 1.0
         z_near = scene.main_camera_node.camera.znear
         z_far = scene.main_camera_node.camera.zfar
+        noninf = np.logical_not(inf_inds)
         if z_far is None:
-            z_far = -1.0
-        # depth_buf = glReadPixels(
-        #     0, 0, width, height, GL_DEPTH_COMPONENT, GL_FLOAT
-        # )
-        # depth_im = np.frombuffer(depth_buf, dtype=np.float32)
-        # depth_im = depth_im.reshape((height, width))
-        # depth_im = np.flip(depth_im, axis=0)
-        # inf_inds = (depth_im == 1.0)
-        # depth_im = 2.0 * depth_im - 1.0
-        # noninf = np.logical_not(inf_inds)
-        # if z_far is None:
-        #     depth_im[noninf] = 2 * z_near / (1.0 - depth_im[noninf])
-        # else:
-        #     depth_im[noninf] = ((2.0 * z_near * z_far) /
-        #                         (z_far + z_near - depth_im[noninf] *
-        #                         (z_far - z_near)))
-        # depth_im[inf_inds] = 0.0
-
-        if flags & RenderFlags.RET_DEPTH:
-            depth_im = self.jit.read_depth_buf(width, height, z_near, z_far)
-
-            # Resize for macos if needed
-            if sys.platform == "darwin":
-                depth_im = self._resize_image(depth_im)
+            depth_im[noninf] = 2 * z_near / (1.0 - depth_im[noninf])
         else:
-            depth_im = None
+            depth_im[noninf] = (2.0 * z_near * z_far) / (z_far + z_near - depth_im[noninf] * (z_far - z_near))
+        depth_im[inf_inds] = 0.0
+
+        # Resize for macos if needed
+        if sys.platform == "darwin":
+            depth_im = self._resize_image(depth_im)
 
         if flags & RenderFlags.DEPTH_ONLY:
             return depth_im
 
         # Read color
-        color_im = self.jit.read_color_buf(width, height, flags & RenderFlags.RGBA)
+        if flags & RenderFlags.RGBA:
+            color_buf = glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE)
+            color_im = np.frombuffer(color_buf, dtype=np.uint8)
+            color_im = color_im.reshape((height, width, 4))
+        else:
+            color_buf = glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE)
+            color_im = np.frombuffer(color_buf, dtype=np.uint8)
+            color_im = color_im.reshape((height, width, 3))
+        color_im = np.flip(color_im, axis=0)
 
         # Resize for macos if needed
         if sys.platform == "darwin":
-            color_im = self._resize_image(color_im, not (flags & RenderFlags.SEG))
+            color_im = self._resize_image(color_im, True)
 
         return color_im, depth_im
 
@@ -1376,7 +1111,7 @@ class Renderer(object):
         V, P = self._get_camera_matrices(scene)
 
         # Now, render each object in sorted order
-        for node in scene.sorted_mesh_nodes():
+        for node in self._sorted_mesh_nodes(scene):
             mesh = node.mesh
 
             # Skip the mesh if it's not visible
@@ -1384,7 +1119,6 @@ class Renderer(object):
                 continue
 
             for primitive in mesh.primitives:
-
                 # First, get and bind the appropriate program
                 program = self._get_primitive_program(primitive, flags, ProgramFlags.USE_MATERIAL)
                 program._bind()
@@ -1481,7 +1215,3 @@ class Renderer(object):
         glDrawArrays(GL_TRIANGLES, 0, 6)
         glBindVertexArray(0)
         glDeleteVertexArrays(1, [x])
-
-    def reload_program(self):
-        self._program_cache.clear()
-        self.jit.program_id.clear()

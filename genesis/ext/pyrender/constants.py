@@ -1,6 +1,6 @@
 DEFAULT_Z_NEAR = 0.05  # Near clipping plane, in meters
 DEFAULT_Z_FAR = 100.0  # Far clipping plane, in meters
-DEFAULT_SCENE_SCALE = 5.0  # Default scene scale
+DEFAULT_SCENE_SCALE = 2.0  # Default scene scale
 MAX_N_LIGHTS = 4  # Maximum number of lights of each type allowed
 TARGET_OPEN_GL_MAJOR = 4  # Target OpenGL Major Version
 TARGET_OPEN_GL_MINOR = 1  # Target OpenGL Minor Version
@@ -8,7 +8,7 @@ MIN_OPEN_GL_MAJOR = 3  # Minimum OpenGL Major Version
 MIN_OPEN_GL_MINOR = 3  # Minimum OpenGL Minor Version
 FLOAT_SZ = 4  # Byte size of GL float32
 UINT_SZ = 4  # Byte size of GL uint32
-SHADOW_TEX_SZ = 8192  # Width and Height of Shadow Textures
+SHADOW_TEX_SZ = 2048  # Width and Height of Shadow Textures
 TEXT_PADDING = 20  # Width of padding for rendering text (px)
 
 
@@ -42,7 +42,7 @@ class RenderFlags(object):
     """Render shadows for point lights."""
     SHADOWS_SPOT = 128
     """Render shadows for spot lights."""
-    SHADOWS_ALL = 32 | 64  # | 128
+    SHADOWS_ALL = 32 | 64 | 128
     """Render shadows for all lights."""
     VERTEX_NORMALS = 256
     """Render vertex normals."""

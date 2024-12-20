@@ -102,11 +102,6 @@ uniform SpotLight spot_lights[MAX_SPOT_LIGHTS];
 uniform int n_spot_lights;
 uniform vec3 cam_pos;
 uniform vec3 ambient_light;
-uniform sampler2D floor_tex;
-uniform int floor_flag;
-uniform vec2 screen_size;
-
-uniform mat4 reflection_mat;
 
 #ifdef USE_IBL
 uniform samplerCube diffuse_env;
@@ -268,7 +263,6 @@ vec3 compute_brdf(vec3 n, vec3 v, vec3 l,
 }
 
 float texture2DCompare(sampler2D depths, vec2 uv, float compare) {
-    if(abs(uv.x*2-1)>0.99 || abs(uv.y*2-1)>0.99) return 0.0;
     return compare > texture(depths, uv.xy).r ? 1.0 : 0.0;
 }
 
@@ -289,14 +283,13 @@ float texture2DShadowLerp(sampler2D depths, vec2 size, vec2 uv, float compare) {
 
 float PCF(sampler2D depths, vec2 size, vec2 uv, float compare){
     float result = 0.0;
-    int range = 1;
-    for(int x=-range; x<=range; x++){
-        for(int y=-range; y<=range; y++){
-            vec2 off = vec2(x,y)*1/size;
+    for(int x=-1; x<=1; x++){
+        for(int y=-1; y<=1; y++){
+            vec2 off = vec2(x,y)/size;
             result += texture2DShadowLerp(depths, size, uv+off, compare);
         }
     }
-    return result/((range*2+1)*(range*2+1));
+    return result/9.0;
 }
 
 float shadow_calc(mat4 light_matrix, sampler2D shadow_map, float nl)
@@ -309,32 +302,10 @@ float shadow_calc(mat4 light_matrix, sampler2D shadow_map, float nl)
     float bias = max(0.001 * (1.0 - nl), 0.0001) / proj_coords.w;
     float compare = (current_depth - bias);
     float shadow = PCF(shadow_map, textureSize(shadow_map, 0), light_coords.xy, compare);
-    //if (light_coords.z > 1.0) {
-        //shadow = 0.0;
-    //}
-    return shadow;
-}
-
-vec3 point_PCF_samples[20] = vec3[]
-(
-   vec3( 1,  1,  1), vec3( 1, -1,  1), vec3(-1, -1,  1), vec3(-1,  1,  1), 
-   vec3( 1,  1, -1), vec3( 1, -1, -1), vec3(-1, -1, -1), vec3(-1,  1, -1),
-   vec3( 1,  1,  0), vec3( 1, -1,  0), vec3(-1, -1,  0), vec3(-1,  1,  0),
-   vec3( 1,  0,  1), vec3(-1,  0,  1), vec3( 1,  0, -1), vec3(-1,  0, -1),
-   vec3( 0,  1,  1), vec3( 0, -1,  1), vec3( 0, -1, -1), vec3( 0,  1, -1)
-);   
-int point_PCF_n = 20;
-
-float point_PCF(samplerCube shadow_map, vec3 frag_to_light, float bias)
-{
-    float point_PCF_radius = 40.0 / textureSize(shadow_map, 0)[0];
-    float dist = length(frag_to_light);
-    float shadow = 0.0;
-    for (int i = 0; i < point_PCF_n; i++) {
-        float dis_shadow = texture(shadow_map, frag_to_light + point_PCF_samples[i] * point_PCF_radius).r * 25.0;
-        shadow += (dis_shadow < 24.5 && dist > dis_shadow + bias) ? 1.0 : 0.0;
+    if (light_coords.z > 1.0) {
+        shadow = 0.0;
     }
-    return shadow / point_PCF_n;
+    return shadow;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -342,9 +313,7 @@ float point_PCF(samplerCube shadow_map, vec3 frag_to_light, float bias)
 ///////////////////////////////////////////////////////////////////////////////
 void main()
 {
-    vec3 reflected_position = (reflection_mat * vec4(frag_position, 1.0)).xyz;
-    if(length(reflected_position - frag_position) > 1e-4 && length(reflected_position-cam_pos)<length(frag_position-cam_pos)) discard;
-    
+
     vec4 color = vec4(vec3(0.0), 1.0);
 ///////////////////////////////////////////////////////////////////////////////
 // Handle Metallic Materials
@@ -367,14 +336,8 @@ void main()
     // Compute albedo
     vec4 base_color = material.base_color_factor;
 #ifdef HAS_BASE_COLOR_TEX
-    base_color = base_color * texture(material.base_color_texture, uv_0);
+    base_color = base_color * srgb_to_linear(texture(material.base_color_texture, uv_0));
 #endif
-
-#ifdef COLOR_0_LOC
-    base_color *= color_multiplier;
-#endif
-
-    base_color = srgb_to_linear(base_color);
 
     // Compute specular and diffuse colors
     vec3 dialectric_spec = vec3(min_roughness);
@@ -424,13 +387,6 @@ void main()
         // Compute outbound color
         vec3 res = compute_brdf(n, v, l, roughness, metallic,
                                 f0, c_diff, base_color.rgb, radiance);
-
-#ifdef POINT_LIGHT_SHADOWS
-        float bias = max(0.05 * (1.0 - dot(n, l)), 0.005);  
-        float shadow = point_PCF(point_lights[i].shadow_map, frag_position - position, bias);
-        res *= (1.0 - shadow);
-#endif
-
         color.xyz += res;
     }
     for (int i = 0; i < n_spot_lights; i++) {
@@ -483,25 +439,11 @@ void main()
 #endif
     color.xyz += emissive * material.emissive_factor;
 
-    vec3 floor_color = floor_flag != 0 ? texture(floor_tex, gl_FragCoord.xy/screen_size).rgb : vec3(0.0);
-
-    if (floor_flag != 0 && length(floor_color) > 1e-4) {
-        //color.xyz *= 0;
-        vec3 floor_radiance = pow(floor_color, vec3(2.2));
-        vec3 v = normalize(cam_pos - frag_position); // Vector towards camera
-        vec3 l = n * dot(n, v) * 2 - v;
-
-        vec3 h = normalize(l+v);
-        float vh = clamp(dot(v, h), 0.0, 1.0);
-        f0 = vec3(0.03);
-        vec3 reflectance = (f0 + (1.0 - f0) * pow(clamp(1.0 - vh, 0.0, 1.0), 5.0)) * 1.0;
-        color.xyz = color.xyz * (1-reflectance) + reflectance * floor_radiance;
-        // color.xyz += compute_brdf(n, v, l, roughness, metallic, f0, c_diff, vec3(0.0), 1*floor_radiance);
-    }
-    // if (floor_flag != 0) color.xyz = floor_color.xyz;
+#ifdef COLOR_0_LOC
+    color *= color_multiplier;
+#endif
 
     frag_color = clamp(vec4(pow(color.xyz, vec3(1.0/2.2)), color.a * base_color.a), 0.0, 1.0);
-
 
 #else
     // TODO GLOSSY MATERIAL BRDF

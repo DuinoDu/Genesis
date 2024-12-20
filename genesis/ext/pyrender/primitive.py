@@ -3,12 +3,12 @@ https://github.com/KhronosGroup/glTF/tree/master/specification/2.0#reference-pri
 
 Author: Matthew Matl
 """
-
 import numpy as np
+
 from OpenGL.GL import *
 
-from .constants import FLOAT_SZ, GLTF, UINT_SZ, BufFlags
 from .material import Material, MetallicRoughnessMaterial
+from .constants import FLOAT_SZ, UINT_SZ, BufFlags, GLTF
 from .utils import format_color_array
 
 
@@ -69,13 +69,7 @@ class Primitive(object):
         mode=None,
         targets=None,
         poses=None,
-        stream_positions=True,
-        stream_poses=True,
-        vertex_mapping=None,
-        double_sided=False,
-        is_floor=False,
     ):
-
         if mode is None:
             mode = GLTF.TRIANGLES
 
@@ -92,18 +86,12 @@ class Primitive(object):
         self.mode = mode
         self.targets = targets
         self.poses = poses
-        self.vertex_mapping = vertex_mapping
-        self.double_sided = double_sided
-        self.is_floor = is_floor
 
         self._bounds = None
         self._vaid = None
-        self._buffers = {}
+        self._buffers = []
         self._is_transparent = None
         self._buf_flags = None
-
-        self.stream_positions = stream_positions
-        self.stream_poses = stream_poses
 
     @property
     def positions(self):
@@ -212,7 +200,7 @@ class Primitive(object):
     @indices.setter
     def indices(self, value):
         if value is not None:
-            value = np.asanyarray(value, dtype=np.int32)
+            value = np.asanyarray(value, dtype=np.float32)
             value = np.ascontiguousarray(value)
         self._indices = value
 
@@ -306,36 +294,9 @@ class Primitive(object):
         """bool : If True, the mesh is partially-transparent."""
         return self._compute_transparency()
 
-    def get_buffer_id(self, buffer_name):
-        if self._vaid is None:
-            return -1
-            # self._add_to_context()
-        if buffer_name not in self._buffers:
-            raise ValueError(f"Buffer {buffer_name} does not exist")
-        return self._buffers[buffer_name]
-
-    def calc_vertex_normal(self):
-        if self.indices is None:
-            p = self.positions.reshape((-1, 3, 3))
-            face_normal = np.cross(p[:, 1] - p[:, 0], p[:, 2] - p[:, 0])
-            face_normal /= np.maximum(1e-10, np.linalg.norm(face_normal, axis=1, keepdims=True))
-            return np.repeat(face_normal, 3, axis=0)
-        else:
-            p = self.positions.reshape((-1, 3))
-            idx = self.indices.reshape((-1, 3))
-            face_normal = np.cross(p[idx[:, 1]] - p[idx[:, 0]], p[idx[:, 2]] - p[idx[:, 0]])
-            vertex_normal = np.zeros_like(p)
-            for f in range(face_normal.shape[0]):
-                vertex_normal[idx[f, 0]] += face_normal[f]
-                vertex_normal[idx[f, 1]] += face_normal[f]
-                vertex_normal[idx[f, 2]] += face_normal[f]
-            vertex_normal /= np.maximum(1e-10, np.linalg.norm(vertex_normal, axis=1, keepdims=True))
-            return vertex_normal
-
     def _add_to_context(self):
         if self._vaid is not None:
-            return
-            # raise ValueError('Mesh is already bound to a context')
+            raise ValueError("Mesh is already bound to a context")
 
         # Generate and bind VAO
         self._vaid = glGenVertexArrays(1)
@@ -346,85 +307,49 @@ class Primitive(object):
         #######################################################################
 
         # Generate and bind vertex buffer
+        vertexbuffer = glGenBuffers(1)
+        self._buffers.append(vertexbuffer)
+        glBindBuffer(GL_ARRAY_BUFFER, vertexbuffer)
 
-        if self.stream_positions:
-            posbuffer = glGenBuffers(1)
-            self._buffers["pos"] = posbuffer
-            glBindBuffer(GL_ARRAY_BUFFER, posbuffer)
-
-            vertex_data = self.positions
-            vertex_data = np.ascontiguousarray(vertex_data.flatten().astype(np.float32))
-            glBufferData(GL_ARRAY_BUFFER, FLOAT_SZ * len(vertex_data), vertex_data, GL_STREAM_DRAW)
-
-            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, FLOAT_SZ * 3, ctypes.c_void_p(0))
-            glEnableVertexAttribArray(0)
-
-            if self.normals is not None:
-                normal_buffer = glGenBuffers(1)
-                self._buffers["normal"] = normal_buffer
-                glBindBuffer(GL_ARRAY_BUFFER, normal_buffer)
-
-                normal_data = self.calc_vertex_normal()
-                normal_data = np.ascontiguousarray(normal_data.flatten().astype(np.float32))
-                glBufferData(GL_ARRAY_BUFFER, FLOAT_SZ * len(normal_data), normal_data, GL_STREAM_DRAW)
-
-                glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, FLOAT_SZ * 3, ctypes.c_void_p(0))
-                glEnableVertexAttribArray(1)
-
-        if self.stream_positions:
-            vertex_data = None
-            attr_sizes = [0]
-        else:
-            # positions
-            vertex_data = self.positions
-            attr_sizes = [3]
+        # positions
+        vertex_data = self.positions
+        attr_sizes = [3]
 
         # Normals
         if self.normals is not None:
-            if self.stream_positions:
-                attr_sizes.append(0)
-            else:
-                vertex_data = np.hstack((vertex_data, self.normals)) if vertex_data is not None else self.normals
-                attr_sizes.append(3)
+            vertex_data = np.hstack((vertex_data, self.normals))
+            attr_sizes.append(3)
 
         # Tangents
         if self.tangents is not None:
-            vertex_data = np.hstack((vertex_data, self.tangents)) if vertex_data is not None else self.tangents
+            vertex_data = np.hstack((vertex_data, self.tangents))
             attr_sizes.append(4)
 
         # Texture Coordinates
         if self.texcoord_0 is not None:
-            vertex_data = np.hstack((vertex_data, self.texcoord_0)) if vertex_data is not None else self.texcoord_0
+            vertex_data = np.hstack((vertex_data, self.texcoord_0))
             attr_sizes.append(2)
         if self.texcoord_1 is not None:
-            vertex_data = np.hstack((vertex_data, self.texcoord_1)) if vertex_data is not None else self.texcoord_1
+            vertex_data = np.hstack((vertex_data, self.texcoord_1))
             attr_sizes.append(2)
 
         # Color
         if self.color_0 is not None:
-            vertex_data = np.hstack((vertex_data, self.color_0)) if vertex_data is not None else self.color_0
+            vertex_data = np.hstack((vertex_data, self.color_0))
             attr_sizes.append(4)
 
         # TODO JOINTS AND WEIGHTS
         # PASS
 
-        if vertex_data is not None:
-            vertexbuffer = glGenBuffers(1)
-            self._buffers["vertex"] = vertexbuffer
-            glBindBuffer(GL_ARRAY_BUFFER, vertexbuffer)
-
-            # Copy data to buffer
-            vertex_data = np.ascontiguousarray(vertex_data.flatten().astype(np.float32))
-            glBufferData(GL_ARRAY_BUFFER, FLOAT_SZ * len(vertex_data), vertex_data, GL_STATIC_DRAW)
-            total_sz = sum(attr_sizes)
-            offset = 0
-            for i, sz in enumerate(attr_sizes):
-                if sz > 0:
-                    glVertexAttribPointer(
-                        i, sz, GL_FLOAT, GL_FALSE, FLOAT_SZ * total_sz, ctypes.c_void_p(FLOAT_SZ * offset)
-                    )
-                    glEnableVertexAttribArray(i)
-                    offset += sz
+        # Copy data to buffer
+        vertex_data = np.ascontiguousarray(vertex_data.flatten().astype(np.float32))
+        glBufferData(GL_ARRAY_BUFFER, FLOAT_SZ * len(vertex_data), vertex_data, GL_STATIC_DRAW)
+        total_sz = sum(attr_sizes)
+        offset = 0
+        for i, sz in enumerate(attr_sizes):
+            glVertexAttribPointer(i, sz, GL_FLOAT, GL_FALSE, FLOAT_SZ * total_sz, ctypes.c_void_p(FLOAT_SZ * offset))
+            glEnableVertexAttribArray(i)
+            offset += sz
 
         #######################################################################
         # Fill model matrix buffer
@@ -436,14 +361,9 @@ class Primitive(object):
             pose_data = np.ascontiguousarray(np.eye(4).flatten().astype(np.float32))
 
         modelbuffer = glGenBuffers(1)
-        self._buffers["model"] = modelbuffer
+        self._buffers.append(modelbuffer)
         glBindBuffer(GL_ARRAY_BUFFER, modelbuffer)
-        glBufferData(
-            GL_ARRAY_BUFFER,
-            FLOAT_SZ * len(pose_data),
-            pose_data,
-            GL_STREAM_DRAW if self.stream_poses else GL_STATIC_DRAW,
-        )
+        glBufferData(GL_ARRAY_BUFFER, FLOAT_SZ * len(pose_data), pose_data, GL_STATIC_DRAW)
 
         for i in range(0, 4):
             idx = i + len(attr_sizes)
@@ -456,7 +376,7 @@ class Primitive(object):
         #######################################################################
         if self.indices is not None:
             elementbuffer = glGenBuffers(1)
-            self._buffers["element"] = elementbuffer
+            self._buffers.append(elementbuffer)
             glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, elementbuffer)
             glBufferData(
                 GL_ELEMENT_ARRAY_BUFFER,
@@ -470,9 +390,9 @@ class Primitive(object):
     def _remove_from_context(self):
         if self._vaid is not None:
             glDeleteVertexArrays(1, [self._vaid])
-            glDeleteBuffers(len(self._buffers), list(self._buffers.values()))
+            glDeleteBuffers(len(self._buffers), self._buffers)
             self._vaid = None
-            self._buffers = {}
+            self._buffers = []
 
     def _in_context(self):
         return self._vaid is not None
@@ -488,10 +408,7 @@ class Primitive(object):
     def _compute_bounds(self):
         """Compute the bounds of this object."""
         # Compute bounds of this object
-        if len(self.positions) == 0:
-            return np.zeros((2, 3))
-        else:
-            bounds = np.array([np.min(self.positions, axis=0), np.max(self.positions, axis=0)])
+        bounds = np.array([np.min(self.positions, axis=0), np.max(self.positions, axis=0)])
 
         # If instanced, compute translations for approximate bounds
         if self.poses is not None:

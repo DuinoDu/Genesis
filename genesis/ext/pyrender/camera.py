@@ -3,7 +3,6 @@ https://github.com/KhronosGroup/glTF/tree/master/specification/2.0#reference-cam
 
 Author: Matthew Matl
 """
-
 import abc
 import numpy as np
 import six
@@ -88,6 +87,7 @@ class Camera(object):
 
 
 class PerspectiveCamera(Camera):
+
     """A perspective camera for perspective projection.
 
     Parameters
@@ -193,7 +193,7 @@ class PerspectiveCamera(Camera):
 
 
 class OrthographicCamera(Camera):
-    """A perspective camera for perspective projection.
+    """An orthographic camera for orthographic projection.
 
     Parameters
     ----------

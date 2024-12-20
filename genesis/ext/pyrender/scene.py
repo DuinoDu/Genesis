@@ -3,15 +3,13 @@ https://github.com/KhronosGroup/glTF/tree/master/specification/2.0#reference-sce
 
 Author: Matthew Matl
 """
-
-import networkx as nx
 import numpy as np
+import networkx as nx
+import trimesh
 
-from genesis.ext import trimesh
-
-from .camera import Camera
-from .light import DirectionalLight, Light, PointLight, SpotLight
 from .mesh import Mesh
+from .camera import Camera
+from .light import Light, PointLight, DirectionalLight, SpotLight
 from .node import Node
 from .utils import format_color_vector
 
@@ -32,7 +30,6 @@ class Scene(object):
     """
 
     def __init__(self, nodes=None, bg_color=None, ambient_light=None, name=None):
-
         if bg_color is None:
             bg_color = np.ones(4)
         else:
@@ -59,8 +56,6 @@ class Scene(object):
         self._camera_nodes = set()
         self._main_camera_node = None
         self._bounds = None
-
-        self._meshes_updated = False
 
         # Transform tree
         self._digraph = nx.DiGraph()
@@ -120,13 +115,6 @@ class Scene(object):
         else:
             value = format_color_vector(value, 3)
         self._ambient_light = value
-
-    def reset_meshes_updated(self):
-        self._meshes_updated = False
-
-    @property
-    def meshes_updated(self):
-        return self._meshes_updated
 
     @property
     def meshes(self):
@@ -211,13 +199,6 @@ class Scene(object):
             corners = []
             for mesh_node in self.mesh_nodes:
                 mesh = mesh_node.mesh
-                plane_flag = False
-                for primitive in mesh.primitives:
-                    if primitive.is_floor:
-                        plane_flag = True
-                        break
-                if plane_flag:
-                    continue
                 pose = self.get_pose(mesh_node)
                 corners_local = trimesh.bounds.corners(mesh.bounds)
                 corners_world = pose[:3, :3].dot(corners_local.T).T + pose[:3, 3]
@@ -244,8 +225,7 @@ class Scene(object):
     @property
     def scale(self):
         """(3,) float : The length of the diagonal of the scene's AABB."""
-        scale = np.linalg.norm(self.extents)
-        return scale
+        return np.linalg.norm(self.extents)
 
     def add(self, obj, name=None, pose=None, parent_node=None, parent_name=None):
         """Add an object (mesh, light, or camera) to the scene.
@@ -275,8 +255,6 @@ class Scene(object):
             node = Node(name=name, matrix=pose, light=obj)
         elif isinstance(obj, Camera):
             node = Node(name=name, matrix=pose, camera=obj)
-        elif isinstance(obj, Node):
-            node = obj
         else:
             raise TypeError("Unrecognized object type")
 
@@ -365,7 +343,6 @@ class Scene(object):
                         self._obj_name_to_nodes[obj.name] = set()
                     self._obj_name_to_nodes[obj.name].add(node)
         if node.mesh is not None:
-            self._meshes_updated = True
             self._mesh_nodes.add(node)
         if node.light is not None:
             if isinstance(node.light, PointLight):
@@ -467,23 +444,11 @@ class Scene(object):
         pose : (4,4) float
             The pose to set the node to.
         """
-        # if node not in self.nodes:
-        #     raise ValueError('Node must already be in scene')
+        if node not in self.nodes:
+            raise ValueError("Node must already be in scene")
         node._matrix = pose
         if node.mesh is not None:
             self._bounds = None
-
-    def reorder_vertices(self, node, vertices):
-        if node.mesh is None or len(node.mesh.primitives) != 1:
-            raise ValueError("Node must have one primitive")
-        primitive = node.mesh.primitives[0]
-        return vertices[primitive.vertex_mapping] if primitive.vertex_mapping is not None else vertices
-
-    def get_buffer_id(self, node, buffer_name):
-        if node.mesh is None or len(node.mesh.primitives) != 1:
-            raise ValueError("Node must have one primitive")
-        primitive = node.mesh.primitives[0]
-        return primitive.get_buffer_id(buffer_name)
 
     def clear(self):
         """Clear out all nodes to form an empty scene."""
@@ -540,7 +505,6 @@ class Scene(object):
                 if len(self._obj_name_to_nodes[obj.name]) == 0:
                     self._obj_name_to_nodes.pop(obj.name)
         if node.mesh is not None:
-            self._meshes_updated = True
             self._mesh_nodes.remove(node)
         if node.light is not None:
             if isinstance(node.light, PointLight):
@@ -587,20 +551,3 @@ class Scene(object):
             scene_pr.add(geometries[geom_name], pose=pose)
 
         return scene_pr
-
-    def sorted_mesh_nodes(self):
-        cam_loc = self.get_pose(self.main_camera_node)[:3, 3]
-        solid_nodes = []
-        trans_nodes = []
-        for node in self.mesh_nodes:
-            mesh = node.mesh
-            if mesh.is_transparent:
-                trans_nodes.append(node)
-            else:
-                solid_nodes.append(node)
-
-        # TODO BETTER SORTING METHOD
-        trans_nodes.sort(key=lambda n: -np.linalg.norm(self.get_pose(n)[:3, 3] - cam_loc))
-        solid_nodes.sort(key=lambda n: -np.linalg.norm(self.get_pose(n)[:3, 3] - cam_loc))
-
-        return solid_nodes + trans_nodes

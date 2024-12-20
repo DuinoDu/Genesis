@@ -86,7 +86,6 @@ def get_device_by_index(device_id):
 
 
 class EGLDevice:
-
     def __init__(self, display=None):
         self._display = display
 

@@ -3,11 +3,9 @@ https://github.com/KhronosGroup/glTF/tree/master/specification/2.0#reference-tex
 
 Author: Matthew Matl
 """
-
 import numpy as np
 
 from OpenGL.GL import *
-from OpenGL.GL.EXT import texture_filter_anisotropic
 
 from .utils import format_texture_source
 from .sampler import Sampler
@@ -163,8 +161,7 @@ class Texture(object):
     ##################
     def _add_to_context(self):
         if self._texid is not None:
-            return
-            # raise ValueError('Texture already loaded into OpenGL context')
+            raise ValueError("Texture already loaded into OpenGL context")
 
         fmt = GL_DEPTH_COMPONENT
         if self.source_channels == "R":
@@ -216,9 +213,6 @@ class Texture(object):
             border_color = np.ones(4).astype(np.float32)
         glTexParameterfv(self.tex_type, GL_TEXTURE_BORDER_COLOR, border_color)
 
-        max_aniso = glGetFloat(texture_filter_anisotropic.GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT)
-        glTexParameterf(GL_TEXTURE_2D, texture_filter_anisotropic.GL_TEXTURE_MAX_ANISOTROPY_EXT, max_aniso)
-
         # Unbind texture
         glBindTexture(self.tex_type, 0)
 
@@ -244,90 +238,3 @@ class Texture(object):
 
     def _bind_as_color_attachment(self):
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, self.tex_type, self._texid, 0)
-
-
-class CubeMapTexture(object):
-    """
-    Cube map depth texture for point light shadow.
-    """
-
-    def __init__(self, width=None, height=None):
-        self.width = width
-        self.height = height
-
-        self.tex_type = GL_TEXTURE_CUBE_MAP
-        self.data_format = GL_FLOAT
-        self._texid = None
-
-    @property
-    def width(self):
-        """int : The width of the texture buffer."""
-        return self._width
-
-    @width.setter
-    def width(self, value):
-        self._width = value
-
-    @property
-    def height(self):
-        """int : The height of the texture buffer."""
-        return self._height
-
-    @height.setter
-    def height(self, value):
-        self._height = value
-
-    def delete(self):
-        """Remove this texture from the OpenGL context."""
-        self._unbind()
-        self._remove_from_context()
-
-    ##################
-    # OpenGL code
-    ##################
-    def _add_to_context(self):
-        if self._texid is not None:
-            return
-            # raise ValueError('Texture already loaded into OpenGL context')
-
-        fmt = GL_DEPTH_COMPONENT
-
-        # Generate the OpenGL texture
-        self._texid = glGenTextures(1)
-        glBindTexture(self.tex_type, self._texid)
-
-        # Flip data for OpenGL buffer
-        width = self.width
-        height = self.height
-
-        # Bind texture and generate mipmaps
-        for i in range(6):
-            glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, fmt, width, height, 0, fmt, self.data_format, None)
-
-        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
-        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
-        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
-        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
-        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE)
-
-        # Unbind texture
-        glBindTexture(self.tex_type, 0)
-
-    def _remove_from_context(self):
-        if self._texid is not None:
-            # TODO OPENGL BUG?
-            # glDeleteTextures(1, [self._texid])
-            glDeleteTextures([self._texid])
-            self._texid = None
-
-    def _in_context(self):
-        return self._texid is not None
-
-    def _bind(self):
-        glBindTexture(self.tex_type, self._texid)
-
-    def _unbind(self):
-        glBindTexture(self.tex_type, 0)
-
-    def _bind_as_depth_attachment(self):
-        glFramebufferTexture(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, self._texid, 0)

@@ -3,7 +3,6 @@ https://github.com/KhronosGroup/glTF/tree/master/specification/2.0#reference-sam
 
 Author: Matthew Matl
 """
-
 from .constants import GLTF
 
 

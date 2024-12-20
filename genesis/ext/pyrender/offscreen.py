@@ -2,12 +2,10 @@
 
 Author: Matthew Matl
 """
-
 import os
 
-from .constants import RenderFlags
 from .renderer import Renderer
-from .shader_program import ShaderProgram, ShaderProgramCache
+from .constants import RenderFlags
 
 
 class OffscreenRenderer(object):
@@ -23,17 +21,19 @@ class OffscreenRenderer(object):
         The size of screen-space points in pixels.
     """
 
-    def __init__(self, point_size=1.0, pyopengl_platform="pyglet", seg_node_map=None):
+    def __init__(self, viewport_width, viewport_height, point_size=1.0):
+        self.viewport_width = viewport_width
+        self.viewport_height = viewport_height
         self.point_size = point_size
+
         self._platform = None
-        self._create(pyopengl_platform)
-        self._seg_node_map = seg_node_map
+        self._renderer = None
+        self._create()
 
     @property
     def viewport_width(self):
         """int : The width of the main viewport, in pixels."""
-        return 32
-        # return self._viewport_width
+        return self._viewport_width
 
     @viewport_width.setter
     def viewport_width(self, value):
@@ -42,8 +42,7 @@ class OffscreenRenderer(object):
     @property
     def viewport_height(self):
         """int : The height of the main viewport, in pixels."""
-        return 32
-        # return self._viewport_height
+        return self._viewport_height
 
     @viewport_height.setter
     def viewport_height(self, value):
@@ -58,18 +57,7 @@ class OffscreenRenderer(object):
     def point_size(self, value):
         self._point_size = float(value)
 
-    def render(
-        self,
-        scene,
-        renderer,
-        flags=RenderFlags.NONE,
-        camera_node=None,
-        shadow=False,
-        seg=False,
-        ret_depth=False,
-        plane_reflection=False,
-        normal=False,
-    ):
+    def render(self, scene, flags=RenderFlags.NONE, seg_node_map=None):
         """Render a scene with the given set of flags.
 
         Parameters
@@ -78,6 +66,10 @@ class OffscreenRenderer(object):
             A scene to render.
         flags : int
             A bitwise or of one or more flags from :class:`.RenderFlags`.
+        seg_node_map : dict
+            A map from :class:`.Node` objects to (3,) colors for each.
+            If specified along with flags set to :attr:`.RenderFlags.SEG`,
+            the color image will be a segmentation image.
 
         Returns
         -------
@@ -88,11 +80,6 @@ class OffscreenRenderer(object):
         depth_im : (h, w) float32
             The depth buffer in linear units.
         """
-
-        if camera_node is not None:
-            saved_camera_node = scene.main_camera_node
-            scene.main_camera_node = camera_node
-
         self._platform.make_current()
         # If platform does not support dynamically-resizing framebuffers,
         # destroy it and restart it
@@ -105,93 +92,59 @@ class OffscreenRenderer(object):
                 self._create()
 
         self._platform.make_current()
-
-        if shadow:
-            flags |= RenderFlags.SHADOWS_ALL
-
-        if plane_reflection:
-            flags |= RenderFlags.REFLECTIVE_FLOOR
-
-        if seg:
-            seg_node_map = self._seg_node_map
-            flags |= RenderFlags.SEG
-        else:
-            seg_node_map = None
-
-        if ret_depth:
-            flags |= RenderFlags.RET_DEPTH
+        self._renderer.viewport_width = self.viewport_width
+        self._renderer.viewport_height = self.viewport_height
+        self._renderer.point_size = self.point_size
 
         if self._platform.supports_framebuffers():
             flags |= RenderFlags.OFFSCREEN
-            retval = renderer.render(scene, flags, seg_node_map)
+            retval = self._renderer.render(scene, flags, seg_node_map)
         else:
-            renderer.render(scene, flags, seg_node_map)
-            depth = renderer.read_depth_buf()
+            self._renderer.render(scene, flags, seg_node_map)
+            depth = self._renderer.read_depth_buf()
             if flags & RenderFlags.DEPTH_ONLY:
                 retval = depth
             else:
-                color = renderer.read_color_buf()
+                color = self._renderer.read_color_buf()
                 retval = color, depth
-
-        if normal:
-
-            class CustomShaderCache:
-                def __init__(self):
-                    self.program = None
-
-                def get_program(self, vertex_shader, fragment_shader, geometry_shader=None, defines=None):
-                    if self.program is None:
-                        absolute_path = os.path.abspath(__file__)
-                        self.program = ShaderProgram(
-                            os.path.join(absolute_path.replace("offscreen.py", ""), "shaders/mesh_normal.vert"),
-                            os.path.join(absolute_path.replace("offscreen.py", ""), "shaders/mesh_normal.frag"),
-                            defines=defines,
-                        )
-                    return self.program
-
-            old_cache = renderer._program_cache
-            renderer._program_cache = CustomShaderCache()
-            normal_arr, _ = renderer.render(scene, RenderFlags.FLAT | RenderFlags.OFFSCREEN)
-            retval = retval + (normal_arr,)
-            renderer._program_cache = old_cache
 
         # Make the platform not current
         self._platform.make_uncurrent()
-
-        if camera_node is not None:
-            scene.main_camera_node = saved_camera_node
-
         return retval
 
     def delete(self):
         """Free all OpenGL resources."""
         self._platform.make_current()
+        self._renderer.delete()
         self._platform.delete_context()
+        del self._renderer
         del self._platform
+        self._renderer = None
         self._platform = None
         import gc
 
         gc.collect()
 
-    def _create(self, platform):
-        if platform == "pyglet":
-            from .platforms.pyglet_platform import PygletPlatform
+    def _create(self):
+        if "PYOPENGL_PLATFORM" not in os.environ:
+            from pyrender.platforms.pyglet_platform import PygletPlatform
 
             self._platform = PygletPlatform(self.viewport_width, self.viewport_height)
-        elif platform == "egl":
-            from .platforms import egl
+        elif os.environ["PYOPENGL_PLATFORM"] == "egl":
+            from pyrender.platforms import egl
 
             device_id = int(os.environ.get("EGL_DEVICE_ID", "0"))
             egl_device = egl.get_device_by_index(device_id)
             self._platform = egl.EGLPlatform(self.viewport_width, self.viewport_height, device=egl_device)
-        elif platform == "osmesa":
-            from .platforms.osmesa import OSMesaPlatform
+        elif os.environ["PYOPENGL_PLATFORM"] == "osmesa":
+            from pyrender.platforms.osmesa import OSMesaPlatform
 
             self._platform = OSMesaPlatform(self.viewport_width, self.viewport_height)
         else:
             raise ValueError("Unsupported PyOpenGL platform: {}".format(os.environ["PYOPENGL_PLATFORM"]))
         self._platform.init_context()
         self._platform.make_current()
+        self._renderer = Renderer(self.viewport_width, self.viewport_height)
 
     def __del__(self):
         try:

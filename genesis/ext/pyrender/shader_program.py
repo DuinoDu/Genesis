@@ -1,17 +1,12 @@
 """OpenGL shader program wrapper.
 """
-
 import numpy as np
 import os
 import re
 
 import OpenGL
 from OpenGL.GL import *
-from OpenGL.platform import ctypesloader
 from OpenGL.GL import shaders as gl_shader_utils
-from time import time
-
-func = None
 
 
 class ShaderProgramCache(object):
@@ -88,7 +83,6 @@ class ShaderProgram(object):
     """
 
     def __init__(self, vertex_shader, fragment_shader, geometry_shader=None, defines=None):
-
         self.vertex_shader = vertex_shader
         self.fragment_shader = fragment_shader
         self.geometry_shader = geometry_shader
@@ -122,7 +116,7 @@ class ShaderProgram(object):
         glBindVertexArray(self._vao_id)
 
         # Compile program
-        self._program_id = gl_shader_utils.compileProgram(*shader_ids, validate=False)
+        self._program_id = gl_shader_utils.compileProgram(*shader_ids)
 
         # Unbind empty VAO PYOPENGL BUG
         glBindVertexArray(0)
@@ -193,46 +187,48 @@ class ShaderProgram(object):
         unsigned : bool
             If True, ints will be treated as unsigned values.
         """
-        # DEBUG
-        # self._unif_map[name] = 1, (1,)
-        loc = glGetUniformLocation(self._program_id, name)
-
-        if loc == -1:
-            raise ValueError("Invalid shader variable: {}".format(name))
-
-        if isinstance(value, np.ndarray):
+        try:
             # DEBUG
-            # self._unif_map[name] = value.size, value.shape
-            if value.ndim == 1:
-                if np.issubdtype(value.dtype, np.unsignedinteger) or unsigned:
-                    dtype = "u"
-                    value = value.astype(np.uint32)
-                elif np.issubdtype(value.dtype, np.integer):
-                    dtype = "i"
-                    value = value.astype(np.int32)
-                else:
-                    dtype = "f"
-                    value = value.astype(np.float32)
-                self._FUNC_MAP[(value.shape[0], dtype)](loc, 1, value)
-            else:
-                func1 = self._FUNC_MAP[(value.shape[0], value.shape[1])]
-                func1(loc, 1, GL_TRUE, value)
+            # self._unif_map[name] = 1, (1,)
+            loc = glGetUniformLocation(self._program_id, name)
 
-        # Call correct uniform function
-        elif isinstance(value, float):
-            glUniform1f(loc, value)
-        elif isinstance(value, int):
-            if unsigned:
-                glUniform1ui(loc, value)
+            if loc == -1:
+                raise ValueError("Invalid shader variable: {}".format(name))
+
+            if isinstance(value, np.ndarray):
+                # DEBUG
+                # self._unif_map[name] = value.size, value.shape
+                if value.ndim == 1:
+                    if np.issubdtype(value.dtype, np.unsignedinteger) or unsigned:
+                        dtype = "u"
+                        value = value.astype(np.uint32)
+                    elif np.issubdtype(value.dtype, np.integer):
+                        dtype = "i"
+                        value = value.astype(np.int32)
+                    else:
+                        dtype = "f"
+                        value = value.astype(np.float32)
+                    self._FUNC_MAP[(value.shape[0], dtype)](loc, 1, value)
+                else:
+                    self._FUNC_MAP[(value.shape[0], value.shape[1])](loc, 1, GL_TRUE, value)
+
+            # Call correct uniform function
+            elif isinstance(value, float):
+                glUniform1f(loc, value)
+            elif isinstance(value, int):
+                if unsigned:
+                    glUniform1ui(loc, value)
+                else:
+                    glUniform1i(loc, value)
+            elif isinstance(value, bool):
+                if unsigned:
+                    glUniform1ui(loc, int(value))
+                else:
+                    glUniform1i(loc, int(value))
             else:
-                glUniform1i(loc, value)
-        elif isinstance(value, bool):
-            if unsigned:
-                glUniform1ui(loc, int(value))
-            else:
-                glUniform1i(loc, int(value))
-        else:
-            raise ValueError("Invalid data type")
+                raise ValueError("Invalid data type")
+        except Exception:
+            pass
 
     _FUNC_MAP = {
         (1, "u"): glUniform1uiv,
@@ -251,7 +247,7 @@ class ShaderProgram(object):
         (2, 3): glUniformMatrix2x3fv,
         (2, 4): glUniformMatrix2x4fv,
         (3, 2): glUniformMatrix3x2fv,
-        (3, 3): glUniformMatrix4fv,
+        (3, 3): glUniformMatrix3fv,
         (3, 4): glUniformMatrix3x4fv,
         (4, 2): glUniformMatrix4x2fv,
         (4, 3): glUniformMatrix4x3fv,

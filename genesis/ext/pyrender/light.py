@@ -3,7 +3,6 @@ https://github.com/KhronosGroup/glTF/tree/master/extensions/2.0/Khronos/KHR_ligh
 
 Author: Matthew Matl
 """
-
 import abc
 import numpy as np
 import six
@@ -11,7 +10,7 @@ import six
 from OpenGL.GL import *
 
 from .utils import format_color_vector
-from .texture import Texture, CubeMapTexture
+from .texture import Texture
 from .constants import SHADOW_TEX_SZ
 from .camera import OrthographicCamera, PerspectiveCamera
 
@@ -33,7 +32,6 @@ class Light(object):
     """
 
     def __init__(self, color=None, intensity=None, name=None):
-
         if color is None:
             color = np.ones(3)
         if intensity is None:
@@ -220,9 +218,7 @@ class PointLight(Light):
         size : int, optional
             Size of texture map. Must be a positive power of two.
         """
-        if size is None:
-            size = SHADOW_TEX_SZ
-        self.shadow_texture = CubeMapTexture(size, size)
+        raise NotImplementedError("Shadows not implemented for point lights")
 
     def _get_shadow_camera(self, scene_scale):
         """Generate and return a shadow mapping camera for this light.
@@ -237,35 +233,7 @@ class PointLight(Light):
         camera : :class:`.Camera`
             The camera used to render shadowmaps for this light.
         """
-        return PerspectiveCamera(znear=0.1, zfar=25.0, yfov=np.clip(np.pi / 2, 0.0, np.pi), aspectRatio=1.0)
-
-    def _get_view_matrices(self, position):
-        def look_at(pos, target, up):
-            z = pos - target
-            z /= np.linalg.norm(z)
-            x = np.cross(up, z)
-            x /= np.linalg.norm(x)
-            y = np.cross(z, x)
-            return np.array(
-                [
-                    [x[0], x[1], x[2], -np.dot(pos, x)],
-                    [y[0], y[1], y[2], -np.dot(pos, y)],
-                    [z[0], z[1], z[2], -np.dot(pos, z)],
-                    [0, 0, 0, 1],
-                ]
-            )
-
-        return np.stack(
-            [
-                look_at(position, position + np.array([1.0, 0.0, 0.0]), np.array([0.0, -1.0, 0.0])),
-                look_at(position, position + np.array([-1.0, 0.0, 0.0]), np.array([0.0, -1.0, 0.0])),
-                look_at(position, position + np.array([0.0, 1.0, 0.0]), np.array([0.0, 0.0, 1.0])),
-                look_at(position, position + np.array([0.0, -1.0, 0.0]), np.array([0.0, 0.0, -1.0])),
-                look_at(position, position + np.array([0.0, 0.0, 1.0]), np.array([0.0, -1.0, 0.0])),
-                look_at(position, position + np.array([0.0, 0.0, -1.0]), np.array([0.0, -1.0, 0.0])),
-            ],
-            axis=0,
-        )
+        raise NotImplementedError("Shadows not implemented for point lights")
 
 
 class SpotLight(Light):
